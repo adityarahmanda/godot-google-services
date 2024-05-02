@@ -25,9 +25,9 @@ class AndroidExportPlugin extends EditorExportPlugin:
 
 	func _get_android_libraries(platform, debug):
 		if debug:
-			return PackedStringArray(["pilum_plugin/bin/debug/Pilum.debug.aar"])
+			return PackedStringArray(["googleservices/bin/debug/GoogleServices.debug.aar"])
 		else:
-			return PackedStringArray(["pilum_plugin/bin/release/Pilum.release.aar"])
+			return PackedStringArray(["googleservices/bin/release/GoogleServices.release.aar"])
 
 	func _get_name():
-		return "PilumPlugin"
+		return "GoogleServicesPlugin"

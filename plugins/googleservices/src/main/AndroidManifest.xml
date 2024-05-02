@@ -17,7 +17,7 @@
     initializer.
     -->
     <meta-data
-        android:name="org.godotengine.plugin.v2.Pilum"
-        android:value="hastatus.godot.plugin.android.pilum.PilumPlugin" />
+        android:name="org.godotengine.plugin.v2.GoogleServices"
+        android:value="adityarahmanda.googleservices.GoogleServicesPlugin" />
   </application>
 </manifest>

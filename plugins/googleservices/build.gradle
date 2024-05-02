@@ -13,12 +13,12 @@ android {
         versionName "1.0"
     }
 
-    namespace = "hastatus.godot.plugin.android.pilum"
+    namespace = "adityarahmanda.googleservices"
 
     // Used to customize the name of generated AAR file.
     libraryVariants.configureEach { variant ->
         variant.outputs.configureEach { output ->
-            output.outputFileName = "Pilum.${variant.name}.aar"
+            output.outputFileName = "GoogleServices.${variant.name}.aar"
         }
     }
 
@@ -30,24 +30,22 @@ dependencies {
 
     implementation platform('com.google.firebase:firebase-bom:32.3.1')
     implementation 'com.google.firebase:firebase-analytics'
-    implementation "com.google.android.gms:play-services-ads:22.6.0"
     implementation 'com.google.firebase:firebase-crashlytics'
-    //GDPR
+    implementation "com.google.android.gms:play-services-ads:22.6.0"
+    implementation "com.google.android.gms:play-services-games-v2:20.0.0"
     implementation 'com.google.android.ump:user-messaging-platform:2.1.0'
-
-
 }
 
 tasks.register('copyDebugAARToDemoAddons', Copy) {
     from 'build/outputs/aar'
-    include 'Pilum.debug.aar'
-    into 'demo/addons/pilum_plugin/bin/debug'
+    include 'GoogleServices.debug.aar'
+    into 'addons/googleservices/bin/debug'
 }
 
 tasks.register('copyReleaseAARToDemoAddons', Copy) {
     from 'build/outputs/aar'
-    include 'Pilum.release.aar'
-    into 'demo/addons/pilum_plugin/bin/release'
+    include 'GoogleServices.release.aar'
+    into 'addons/googleservices/bin/release'
 }
 
 
