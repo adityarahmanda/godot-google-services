@@ -183,9 +183,7 @@ public class PilumPlugin extends GodotPlugin {
   public void loadRewarded(final String rewardedId){
     AdRequest adRequest = new AdRequest.Builder().build();
 
-    final Activity activity = getActivity();
-    if(activity!=null && !activity.isFinishing()) {
-
+    getActivity().runOnUiThread(()->
       RewardedAd.load(getActivity(), rewardedId,
         adRequest, new RewardedAdLoadCallback() {
         @Override
@@ -200,17 +198,13 @@ public class PilumPlugin extends GodotPlugin {
           mRewardedAd = ad;
           emitSignal(PilumSignals.SIGNAL_ADMOB_REWARDED_LOADED);
         }
-      });
-    }
-
+      })
+    );
   }
 
   @UsedByGodot
   public void showLoadedRewadedAd() {
-    final Activity activity = getActivity();
-
-
-    if(mRewardedAd!=null && activity!=null && !activity.isFinishing()) {
+    if(mRewardedAd!=null) {
       mRewardedAd.setFullScreenContentCallback(new FullScreenContentCallback() {
         @Override
         public void onAdClicked() {
@@ -246,12 +240,13 @@ public class PilumPlugin extends GodotPlugin {
         }
       });
 
-
-      mRewardedAd.show(activity, rewardItem -> {
-        // Handle the reward.
-        emitSignal(PilumSignals.SIGNAL_ADMOB_REWARDED, rewardItem.getType(), rewardItem.getAmount());
-      });
-
+      final Activity activity = getActivity();
+      if(activity!=null && !activity.isFinishing()) {
+        getActivity().runOnUiThread(() -> mRewardedAd.show(activity, rewardItem -> {
+          // Handle the reward.
+          emitSignal(PilumSignals.SIGNAL_ADMOB_REWARDED, rewardItem.getType(), rewardItem.getAmount());
+        }));
+      }
     }
     else {
       emitSignal(PilumSignals.SIGNAL_ADMOB_REWARDED_FAILED_SHOW_FULLSCREEN_CONTENT);
@@ -314,9 +309,6 @@ public class PilumPlugin extends GodotPlugin {
 
               }
             }));
-
-    emitSignal(PilumSignals.SIGNAL_ADMOB_INTERSTITIAL_FAIL_TO_LOAD, -42, "Pilum is not using Admob yet");
-
   }
 
 
