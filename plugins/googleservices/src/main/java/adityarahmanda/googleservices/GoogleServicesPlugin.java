@@ -1,14 +1,19 @@
+// code modified from https://github.com/hastatus-games/pilum-godot/tree/master
 package adityarahmanda.googleservices;
 import adityarahmanda.googleservices.Signals;
 
 import android.app.Activity;
+import android.app.IntentService;
 import android.content.Context;
+import android.content.Intent;
 import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.NetworkInfo;
+import android.net.NetworkRequest;
+import android.net.NetworkCapabilities;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
-import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 
@@ -46,19 +51,20 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class GoogleServicesPlugin extends GodotPlugin {
-  private FirebaseAnalytics firebaseAnalytics;
+  private FirebaseAnalytics mFirebaseAnalytics;
   private RewardedAd mRewardedAd;
-  private ConsentInformation consentInformation;
-  private GamesSignInClient gamesSignInClient;
-  private AchievementsClient achievementsClient;
-  private View testContainer;
-  private boolean admobLoaded;
-  private boolean authenticated;
-  private AtomicBoolean admobInitialized;
+  private AtomicBoolean mMobileAdsInitialized;
+  private ConsentInformation mConsentInformation;
+  private GamesSignInClient mGamesSignInClient;
+  private AchievementsClient mAchievementsClient;
+  private ConnectivityManager.NetworkCallback mNetworkCallback;
+  private boolean mAuthenticated;
+  
+  private static final int RC_ACHIEVEMENT_UI = 9003;
 
   public GoogleServicesPlugin(Godot godot) {
     super(godot);
-    admobInitialized = new AtomicBoolean(false);
+    mMobileAdsInitialized = new AtomicBoolean(false);
   }
 
   @Override
@@ -71,41 +77,89 @@ public class GoogleServicesPlugin extends GodotPlugin {
   @Override
   public Set<SignalInfo> getPluginSignals() {
     Set<SignalInfo> signals = new HashSet<>();
-
-    signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_INIT_COMPLETE));
+    signals.add(new SignalInfo(Signals.SIGNAL_MOBILE_ADS_INIT_COMPLETE));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_LOADED));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED, String.class, Integer.class ));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_FAIL_TO_LOAD, Integer.class, String.class));
-
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_CLICKED));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_DISMISSED_FULLSCREEN_CONTENT));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_FAILED_SHOW_FULLSCREEN_CONTENT));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_IMPRESSION));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_SHOWED_FULLSCREEN_CONTENT));
-
-    signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_ERROR_GDPR_CONSENT, Integer.class, String.class));
-
+    signals.add(new SignalInfo(Signals.SIGNAL_CONSENT_GDPR_ERROR, Integer.class, String.class));
+    signals.add(new SignalInfo(Signals.SIGNAL_CONSENT_FORM_DISMISSED));
+    signals.add(new SignalInfo(Signals.SIGNAL_CONNECTIVITY_AVAILABLE));
+    signals.add(new SignalInfo(Signals.SIGNAL_CONNECTIVITY_LOST));
     return signals;
+  }
+
+  @Override
+  public void onMainPause(){
+    unregisterOnNetworkAvailableHandler();
+  }
+
+  @Override
+  public void onMainResume(){
+    registerOnNetworkAvailableHandler();
   }
 
   @UsedByGodot
   public void initializeAnalytics() {
     final Activity activity = getActivity();
     if(activity!=null && !activity.isFinishing()) {
+      Log.d("ANALYTICS", "Initializing Analytics...");
       FirebaseCrashlytics.getInstance().setCrashlyticsCollectionEnabled(!BuildConfig.DEBUG);
       FirebaseAnalytics.getInstance(activity).setAnalyticsCollectionEnabled(true);
-      firebaseAnalytics = FirebaseAnalytics.getInstance(activity);
+      mFirebaseAnalytics = FirebaseAnalytics.getInstance(activity);
     }
+  }
+  
+  @UsedByGodot
+  public void logEvent(String eventName, org.godotengine.godot.Dictionary params) {
+    Bundle bundle = new Bundle();
+
+    String paramText = "";
+    if(params!=null) {
+      Set<Map.Entry<String, Object>> entrySet = params.entrySet();
+      for (Map.Entry<String, Object> entry : entrySet) {
+        String key = entry.getKey();
+        Object value = entry.getValue();
+        paramText = String.format("{%s:%s}", key, String.valueOf(value));
+
+        if(entry.getValue() instanceof String) {
+          bundle.putString(key, (String)value);
+        }
+        else if(entry.getValue() instanceof Integer) {
+          bundle.putInt(key, (Integer)value);
+        }
+        else if(entry.getValue() instanceof Boolean) {
+          bundle.putBoolean(key, (Boolean)value);
+        }
+        else if(entry.getValue() instanceof Float) {
+          bundle.putFloat(key, (Float)value);
+        }
+        else if(entry.getValue() instanceof Double) {
+          bundle.putDouble(key, (Double)value);
+        }
+        else if(entry.getValue() instanceof Long) {
+          bundle.putLong(key, (Long)value);
+        }
+      }
+    }
+
+    Log.d("ANALYTICS", String.format("Logging Analytics %s Event with parameter %s...", eventName, paramText));
+    mFirebaseAnalytics.logEvent(eventName, bundle);
   }
 
   @UsedByGodot
-  private void initializeAdmob(final boolean testMode, final String testDeviceId){
+  private void initializeMobileAds(final boolean testMode, final String testDeviceId){
     final Activity activity = getActivity();
     if(activity!=null && !activity.isFinishing()) {
-      consentInformation = UserMessagingPlatform.getConsentInformation(activity);
+      Log.d("MOBILE_ADS", String.format("Initializing Mobile Ads (TestMode:%s,TestDeviceId:%s)...", String.valueOf(testMode), testDeviceId));
+      mConsentInformation = UserMessagingPlatform.getConsentInformation(activity);
       ConsentRequestParameters params;
       if (testMode) {
-        consentInformation.reset(); //reset to always ask
+        mConsentInformation.reset(); //reset to always ask
 
         //force geography area to GDPR
         ConsentDebugSettings debugSettings = new ConsentDebugSettings.Builder(activity)
@@ -117,18 +171,14 @@ public class GoogleServicesPlugin extends GodotPlugin {
           .Builder()
           .setConsentDebugSettings(debugSettings)
           .build();
-      }
-      else {
-        // Set tag for under age of consent. false means users are not under age
-        // of consent.
+      } else {
         params = new ConsentRequestParameters
           .Builder()
-          .setTagForUnderAgeOfConsent(false)
+          .setTagForUnderAgeOfConsent(true) // Set tag for under age of consent. false means users are not under age of consent
           .build();
       }
 
-      // Consent gathering failed.
-      consentInformation.requestConsentInfoUpdate(
+      mConsentInformation.requestConsentInfoUpdate(
         activity,
         params,
         () -> UserMessagingPlatform.loadAndShowConsentFormIfRequired(
@@ -140,8 +190,8 @@ public class GoogleServicesPlugin extends GodotPlugin {
             }
 
             // Consent has been gathered.
-            if (consentInformation.canRequestAds()) {
-              processInitializeAdmob(testMode, testDeviceId);
+            if (mConsentInformation.canRequestAds()) {
+              tryInitializeMobileAds(testMode, testDeviceId);
             }
           }
         ),
@@ -150,48 +200,60 @@ public class GoogleServicesPlugin extends GodotPlugin {
       // Check if you can initialize the Google Mobile Ads SDK in parallel
       // while checking for new consent information. Consent obtained in
       // the previous session can be used to request ads.
-      processInitializeAdmob(testMode, testDeviceId);
-    }
-  }
-
-  private void processInitializeAdmob(boolean testMode, final String testDeviceId) {
-    if (consentInformation.canRequestAds() && admobInitialized.compareAndSet(false, true)) {
-        if (testMode) {
-          List<String> testDeviceIds = Collections.singletonList(testDeviceId);
-          RequestConfiguration configuration = new RequestConfiguration.Builder().setTestDeviceIds(testDeviceIds).build();
-          MobileAds.setRequestConfiguration(configuration);
-          runOnUiThread(()->Toast.makeText(getActivity(), "Test mode ENABLE!", Toast.LENGTH_LONG).show());
-        }
-
-        MobileAds.initialize(getActivity(), initializationStatus -> {
-          emitSignal(Signals.SIGNAL_ADMOB_INIT_COMPLETE);
-          admobLoaded = true;
-        });
-      }
-  }
-
-  @UsedByGodot
-  public void initializePlayGames() {
-    final Activity activity = getActivity();
-    if(activity!=null && !activity.isFinishing()) {
-      PlayGamesSdk.initialize(activity);
-      gamesSignInClient = PlayGames.getGamesSignInClient(activity);
-      achievementsClient = PlayGames.getAchievementsClient(activity);
-      gamesSignInClient.isAuthenticated().addOnCompleteListener(isAuthenticatedTask -> {
-        authenticated = (isAuthenticatedTask.isSuccessful() && isAuthenticatedTask.getResult().isAuthenticated());
-      });
+      tryInitializeMobileAds(testMode, testDeviceId);
     }
   }
 
   private void sendErrorGDPRUserConsent(FormError formError) {
-    Log.w("CONSENT_GDRP", String.format("%s: %s", formError.getErrorCode(), formError.getMessage()));
-    emitSignal(Signals.SIGNAL_ADMOB_ERROR_GDPR_CONSENT, formError.getErrorCode(), formError.getMessage());
+    Log.w("GDPR_CONSENT", String.format("Error %s - %s", formError.getErrorCode(), formError.getMessage()));
+    emitSignal(Signals.SIGNAL_CONSENT_GDPR_ERROR, formError.getErrorCode(), formError.getMessage());
+  }
+
+  private void tryInitializeMobileAds(boolean testMode, final String testDeviceId) {
+    Log.d("MOBILE_ADS", String.format("Trying to initialize Mobile Ads (ConsentRequestAds:%s)...", String.valueOf(mConsentInformation.canRequestAds())));
+    if (mConsentInformation.canRequestAds() && mMobileAdsInitialized.compareAndSet(false, true)) {
+      RequestConfiguration.Builder configurationBuilder = new RequestConfiguration.Builder()
+        .setTagForUnderAgeOfConsent(RequestConfiguration.TAG_FOR_UNDER_AGE_OF_CONSENT_TRUE) // Set tag for under age of consent. false means users are not under age of consent
+        .setMaxAdContentRating(RequestConfiguration.MAX_AD_CONTENT_RATING_G); // Set Ad Content rating. G means content suitable for general audiences, including families
+      if (testMode) {
+        List<String> testDeviceIds = Collections.singletonList(testDeviceId);
+        configurationBuilder.setTestDeviceIds(testDeviceIds);
+      }
+      MobileAds.setRequestConfiguration(configurationBuilder.build());
+      MobileAds.initialize(getActivity(), initializationStatus -> {
+        emitSignal(Signals.SIGNAL_MOBILE_ADS_INIT_COMPLETE);
+        Log.d("MOBILE_ADS", "Mobile Ads Initialization Success");
+      });
+    }
+    else
+    {
+      Log.d("MOBILE_ADS", "Mobile Ads Initialization Failed");
+    }
   }
 
   @UsedByGodot
-  public void loadRewardedAd(final String rewardedId){
-    AdRequest adRequest = new AdRequest.Builder().build();
+  public void showPrivacyOptionsForm() {
+    final Activity activity = getActivity();
+    if(activity!=null && !activity.isFinishing()) {
+      getActivity().runOnUiThread(() -> UserMessagingPlatform.showPrivacyOptionsForm(activity, 
+        loadAndShowError -> {
+          if (loadAndShowError != null) {
+            // Consent gathering failed.
+            sendErrorGDPRUserConsent(loadAndShowError);
+          }
 
+          // Consent has been gathered.
+          if (mConsentInformation.canRequestAds()) {
+            emitSignal(Signals.SIGNAL_CONSENT_FORM_DISMISSED);
+          }
+        }));
+      }
+  }
+  
+  @UsedByGodot
+  public void loadRewardedAd(final String rewardedId){
+    Log.d("ADMOB", String.format("Loading Rewarded Ad with id %s...", rewardedId));
+    AdRequest adRequest = new AdRequest.Builder().build();
     getActivity().runOnUiThread(()->
       RewardedAd.load(getActivity(), rewardedId,
         adRequest, new RewardedAdLoadCallback() {
@@ -200,12 +262,14 @@ public class GoogleServicesPlugin extends GodotPlugin {
           // Handle the error.
           emitSignal(Signals.SIGNAL_ADMOB_REWARDED_FAIL_TO_LOAD, loadAdError.getCode(), loadAdError.getMessage());
           mRewardedAd = null;
+          Log.d("ADMOB", String.format("Rewarded Ad with id %s failed to load", rewardedId));
         }
 
         @Override
         public void onAdLoaded(@NonNull RewardedAd ad) {
           mRewardedAd = ad;
           emitSignal(Signals.SIGNAL_ADMOB_REWARDED_LOADED);
+          Log.d("ADMOB", String.format("Rewarded Ad with id %s is loaded!", rewardedId));
         }
       })
     );
@@ -214,6 +278,7 @@ public class GoogleServicesPlugin extends GodotPlugin {
   @UsedByGodot
   public void showLoadedRewardedAd() {
     if(mRewardedAd!=null) {
+      Log.d("ADMOB", "Showing loaded rewarded ad...");
       mRewardedAd.setFullScreenContentCallback(new FullScreenContentCallback() {
         @Override
         public void onAdClicked() {
@@ -253,7 +318,10 @@ public class GoogleServicesPlugin extends GodotPlugin {
       if(activity!=null && !activity.isFinishing()) {
         getActivity().runOnUiThread(() -> mRewardedAd.show(activity, rewardItem -> {
           // Handle the reward.
-          emitSignal(Signals.SIGNAL_ADMOB_REWARDED, rewardItem.getType(), rewardItem.getAmount());
+          String itemType = rewardItem.getType();
+          int rewardAmount = rewardItem.getAmount();
+          Log.d("ADMOB", String.format("Earned %s with %s reward amount from Rewarded Ad", itemType, String.valueOf(rewardAmount)));
+          emitSignal(Signals.SIGNAL_ADMOB_REWARDED, itemType, rewardAmount);
         }));
       }
     }
@@ -263,76 +331,116 @@ public class GoogleServicesPlugin extends GodotPlugin {
   }
 
   @UsedByGodot
-  public boolean isAdmobLoaded() {
-    return this.admobLoaded;
+  public boolean isRewardedAdLoaded() {
+    return this.mRewardedAd != null;
   }
 
   @UsedByGodot
-  public boolean isAuthenticated() {
-    return this.authenticated;
+  public boolean hasGdprConsentForAds() {
+    return this.mConsentInformation.canRequestAds();
   }
 
   @UsedByGodot
-  public boolean isConnected() {
-    boolean connected = false;
+  public void initializePlayGames() {
     final Activity activity = getActivity();
-
     if(activity!=null && !activity.isFinishing()) {
-      ConnectivityManager cm = (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
-      NetworkInfo netInfo = cm.getActiveNetworkInfo();
-
-      if (netInfo != null && netInfo.isConnectedOrConnecting()) {
-        connected = true;
-      }
+      Log.d("PLAY_GAMES", "Initializing Play Games...");
+      PlayGamesSdk.initialize(activity);
+      mGamesSignInClient = PlayGames.getGamesSignInClient(activity);
+      mGamesSignInClient.isAuthenticated().addOnCompleteListener(isAuthenticatedTask -> {
+        mAuthenticated = (isAuthenticatedTask.isSuccessful() && isAuthenticatedTask.getResult().isAuthenticated());
+        if (mAuthenticated) {
+          mAchievementsClient = PlayGames.getAchievementsClient(activity);
+          Log.d("PLAY_GAMES", "Play Games Authentication Success!");
+        } else {
+          Log.d("PLAY_GAMES", "Play Games Authentication Failed!");
+        }
+      });
     }
-
-    return connected;
-  }
-
-  @UsedByGodot
-  public void logEvent(String eventName, org.godotengine.godot.Dictionary params) {
-    Bundle bundle = new Bundle();
-
-    String paramText = "";
-    if(params!=null) {
-      Set<Map.Entry<String, Object>> entrySet = params.entrySet();
-      for (Map.Entry<String, Object> entry : entrySet) {
-        String key = entry.getKey();
-        Object value = entry.getValue();
-        paramText = String.format("{%s:%s}", key, value.toString());
-
-        if(entry.getValue() instanceof String) {
-          bundle.putString(key, (String)value);
-        }
-        else if(entry.getValue() instanceof Integer) {
-          bundle.putInt(key, (Integer)value);
-        }
-        else if(entry.getValue() instanceof Boolean) {
-          bundle.putBoolean(key, (Boolean)value);
-        }
-        else if(entry.getValue() instanceof Float) {
-          bundle.putFloat(key, (Float)value);
-        }
-        else if(entry.getValue() instanceof Double) {
-          bundle.putDouble(key, (Double)value);
-        }
-        else if(entry.getValue() instanceof Long) {
-          bundle.putLong(key, (Long)value);
-        }
-      }
-    }
-
-    Log.d("ANALYTICS_EVENTS", String.format("Log Analytics Event: %s:%s", eventName, paramText));
-    firebaseAnalytics.logEvent(eventName, bundle);
   }
 
   @UsedByGodot
   public void unlockAchievement(String achievementId) {
-    if (!authenticated) return;
-    
+    if (!mAuthenticated) {
+      Log.d("PLAY_GAMES", String.format("Can't unlock achievement with id %s, Play Games is not authenticated", achievementId));
+      return;
+    }
+
     final Activity activity = getActivity();
     if(activity!=null && !activity.isFinishing()) {
-      achievementsClient.unlock(achievementId);
+      Log.d("PLAY_GAMES", String.format("Unlocking achievement with id %s...", achievementId));
+      mAchievementsClient.unlock(achievementId);
     }
+  }
+
+  @UsedByGodot
+  private void showAchievements() {
+    final Activity activity = getActivity();
+    if(activity!=null && !activity.isFinishing()) {
+      Log.d("PLAY_GAMES", "Showing Achivements...");
+      mAchievementsClient.getAchievementsIntent().addOnSuccessListener(intent -> {
+        activity.startActivityForResult(intent, RC_ACHIEVEMENT_UI);
+      });
+    }
+  }
+
+  @UsedByGodot
+  public boolean isAuthenticated() {
+    return this.mAuthenticated;
+  }
+
+  private void registerOnNetworkAvailableHandler()
+  {
+    final Activity activity = getActivity();
+    if(activity!=null && !activity.isFinishing()) {
+      Log.d("CONNECTIVITY", "Registering Network Callbacks...");
+      mNetworkCallback = new ConnectivityManager.NetworkCallback() {
+        @Override
+        public void onAvailable(@NonNull Network network) {
+          super.onAvailable(network);
+          emitSignal(Signals.SIGNAL_CONNECTIVITY_AVAILABLE);
+          Log.d("CONNECTIVITY", "Network Connectivity Available");
+        }
+
+        @Override
+        public void onLost(@NonNull Network network) {
+          super.onLost(network);
+          emitSignal(Signals.SIGNAL_CONNECTIVITY_LOST);
+          Log.d("CONNECTIVITY", "Network Connectivity Lost");
+        }
+      };
+
+      ConnectivityManager connectivityManager = (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+      NetworkRequest networkRequest = new NetworkRequest.Builder()
+        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+        .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+        .build();
+      connectivityManager.registerNetworkCallback(networkRequest, mNetworkCallback);
+    }
+  }
+
+  private void unregisterOnNetworkAvailableHandler()
+  {
+    final Activity activity = getActivity();
+    if(activity!=null && !activity.isFinishing()) {
+      Log.d("CONNECTIVITY", "Unregistering up Network Callbacks...");
+      ConnectivityManager connectivityManager = (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+      connectivityManager.unregisterNetworkCallback(mNetworkCallback);
+    }
+  }
+
+  @UsedByGodot
+  public boolean isConnectedToNetwork() {
+    boolean connected = false;
+    final Activity activity = getActivity();
+    if(activity!=null && !activity.isFinishing()) {
+      ConnectivityManager connectivityManager = (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+      NetworkInfo networkInfo = connectivityManager.getActiveNetworkInfo();
+      if (networkInfo != null && networkInfo.isConnectedOrConnecting()) {
+        connected = true;
+      }
+    }
+    return connected;
   }
 }
