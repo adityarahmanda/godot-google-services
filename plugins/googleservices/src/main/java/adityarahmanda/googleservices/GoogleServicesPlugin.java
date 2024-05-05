@@ -14,9 +14,11 @@ import android.net.NetworkCapabilities;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.View;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 
+import com.google.android.gms.tasks.Task;
 import com.google.android.gms.ads.AdError;
 import com.google.android.gms.ads.AdRequest;
 import com.google.android.gms.ads.FullScreenContentCallback;
@@ -29,6 +31,7 @@ import com.google.android.gms.games.PlayGamesSdk;
 import com.google.android.gms.games.PlayGames;
 import com.google.android.gms.games.GamesSignInClient;
 import com.google.android.gms.games.AchievementsClient;
+import com.google.android.gms.games.AuthenticationResult;
 import com.google.android.ump.ConsentDebugSettings;
 import com.google.android.ump.ConsentInformation;
 import com.google.android.ump.ConsentRequestParameters;
@@ -58,7 +61,7 @@ public class GoogleServicesPlugin extends GodotPlugin {
   private GamesSignInClient mGamesSignInClient;
   private AchievementsClient mAchievementsClient;
   private ConnectivityManager.NetworkCallback mNetworkCallback;
-  private boolean mAuthenticated;
+  private boolean mIsAuthenticated;
   
   private static final int RC_ACHIEVEMENT_UI = 9003;
 
@@ -78,6 +81,9 @@ public class GoogleServicesPlugin extends GodotPlugin {
   public Set<SignalInfo> getPluginSignals() {
     Set<SignalInfo> signals = new HashSet<>();
     signals.add(new SignalInfo(Signals.SIGNAL_MOBILE_ADS_INIT_COMPLETE));
+    signals.add(new SignalInfo(Signals.SIGNAL_CONSENT_GDPR_ERROR, Integer.class, String.class));
+    signals.add(new SignalInfo(Signals.SIGNAL_CONSENT_FORM_DISMISSED));
+    signals.add(new SignalInfo(Signals.SIGNAL_PLAY_GAMES_AUTH_COMPLETE));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_LOADED));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED, String.class, Integer.class ));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_FAIL_TO_LOAD, Integer.class, String.class));
@@ -86,8 +92,6 @@ public class GoogleServicesPlugin extends GodotPlugin {
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_FAILED_SHOW_FULLSCREEN_CONTENT));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_IMPRESSION));
     signals.add(new SignalInfo(Signals.SIGNAL_ADMOB_REWARDED_SHOWED_FULLSCREEN_CONTENT));
-    signals.add(new SignalInfo(Signals.SIGNAL_CONSENT_GDPR_ERROR, Integer.class, String.class));
-    signals.add(new SignalInfo(Signals.SIGNAL_CONSENT_FORM_DISMISSED));
     signals.add(new SignalInfo(Signals.SIGNAL_CONNECTIVITY_AVAILABLE));
     signals.add(new SignalInfo(Signals.SIGNAL_CONNECTIVITY_LOST));
     return signals;
@@ -178,11 +182,8 @@ public class GoogleServicesPlugin extends GodotPlugin {
           .build();
       }
 
-      mConsentInformation.requestConsentInfoUpdate(
-        activity,
-        params,
-        () -> UserMessagingPlatform.loadAndShowConsentFormIfRequired(
-          activity,
+      runOnUiThread(() -> mConsentInformation.requestConsentInfoUpdate(activity, params,
+        () -> UserMessagingPlatform.loadAndShowConsentFormIfRequired(activity,
           loadAndShowError -> {
             if (loadAndShowError != null) {
               // Consent gathering failed.
@@ -195,7 +196,7 @@ public class GoogleServicesPlugin extends GodotPlugin {
             }
           }
         ),
-        this::sendErrorGDPRUserConsent);
+        this::sendErrorGDPRUserConsent));
 
       // Check if you can initialize the Google Mobile Ads SDK in parallel
       // while checking for new consent information. Consent obtained in
@@ -235,7 +236,8 @@ public class GoogleServicesPlugin extends GodotPlugin {
   public void showPrivacyOptionsForm() {
     final Activity activity = getActivity();
     if(activity!=null && !activity.isFinishing()) {
-      getActivity().runOnUiThread(() -> UserMessagingPlatform.showPrivacyOptionsForm(activity, 
+      Log.d("GDPR_CONSENT", "Showing privacy options form...");
+      runOnUiThread(() -> UserMessagingPlatform.showPrivacyOptionsForm(activity, 
         loadAndShowError -> {
           if (loadAndShowError != null) {
             // Consent gathering failed.
@@ -254,7 +256,7 @@ public class GoogleServicesPlugin extends GodotPlugin {
   public void loadRewardedAd(final String rewardedId){
     Log.d("ADMOB", String.format("Loading Rewarded Ad with id %s...", rewardedId));
     AdRequest adRequest = new AdRequest.Builder().build();
-    getActivity().runOnUiThread(()->
+    runOnUiThread(()->
       RewardedAd.load(getActivity(), rewardedId,
         adRequest, new RewardedAdLoadCallback() {
         @Override
@@ -347,21 +349,34 @@ public class GoogleServicesPlugin extends GodotPlugin {
       Log.d("PLAY_GAMES", "Initializing Play Games...");
       PlayGamesSdk.initialize(activity);
       mGamesSignInClient = PlayGames.getGamesSignInClient(activity);
-      mGamesSignInClient.isAuthenticated().addOnCompleteListener(isAuthenticatedTask -> {
-        mAuthenticated = (isAuthenticatedTask.isSuccessful() && isAuthenticatedTask.getResult().isAuthenticated());
-        if (mAuthenticated) {
-          mAchievementsClient = PlayGames.getAchievementsClient(activity);
-          Log.d("PLAY_GAMES", "Play Games Authentication Success!");
-        } else {
-          Log.d("PLAY_GAMES", "Play Games Authentication Failed!");
-        }
-      });
+      mGamesSignInClient.isAuthenticated().addOnCompleteListener(isAuthenticatedTask -> onSignInPlayGames(activity, isAuthenticatedTask));
     }
   }
 
   @UsedByGodot
+  public void signInPlayGames() {
+    if(mIsAuthenticated) return;
+    
+    final Activity activity = getActivity();
+    if(activity!=null && !activity.isFinishing()) {
+      mGamesSignInClient.signIn().addOnCompleteListener(isAuthenticatedTask -> onSignInPlayGames(activity, isAuthenticatedTask));
+    }
+  }
+
+  private void onSignInPlayGames(Activity activity, Task<AuthenticationResult> isAuthenticatedTask) {
+    mIsAuthenticated = (isAuthenticatedTask.isSuccessful() && isAuthenticatedTask.getResult().isAuthenticated());
+    if (mIsAuthenticated) {
+      mAchievementsClient = PlayGames.getAchievementsClient(activity);
+      Log.d("PLAY_GAMES", "Play Games Authentication Success!");
+    } else {
+      Log.d("PLAY_GAMES", "Play Games Authentication Failed!");
+    }
+    emitSignal(Signals.SIGNAL_PLAY_GAMES_AUTH_COMPLETE);
+  }
+
+  @UsedByGodot
   public void unlockAchievement(String achievementId) {
-    if (!mAuthenticated) {
+    if (!mIsAuthenticated) {
       Log.d("PLAY_GAMES", String.format("Can't unlock achievement with id %s, Play Games is not authenticated", achievementId));
       return;
     }
@@ -375,6 +390,7 @@ public class GoogleServicesPlugin extends GodotPlugin {
 
   @UsedByGodot
   private void showAchievements() {
+    if (mAchievementsClient == null) return;
     final Activity activity = getActivity();
     if(activity!=null && !activity.isFinishing()) {
       Log.d("PLAY_GAMES", "Showing Achivements...");
@@ -386,7 +402,7 @@ public class GoogleServicesPlugin extends GodotPlugin {
 
   @UsedByGodot
   public boolean isAuthenticated() {
-    return this.mAuthenticated;
+    return this.mIsAuthenticated;
   }
 
   private void registerOnNetworkAvailableHandler()
@@ -442,5 +458,13 @@ public class GoogleServicesPlugin extends GodotPlugin {
       }
     }
     return connected;
+  }
+
+  @UsedByGodot
+  public void showToast(String message) {
+    final Activity activity = getActivity();
+    if(activity!=null && !activity.isFinishing()) {
+      runOnUiThread(()->Toast.makeText(activity, message, Toast.LENGTH_SHORT).show());
+    }
   }
 }
